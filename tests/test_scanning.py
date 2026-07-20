@@ -202,6 +202,38 @@ class ScanSessionsTests(unittest.TestCase):
         with patch.object(migrator.subprocess, "run", side_effect=[denied, fallback]):
             self.assertEqual(migrator.find_running_codex_processes(), ["codex"])
 
+    def test_restore_recovers_jsonl_and_database_and_backs_up_current_state(self) -> None:
+        session_id = "restore-session"
+        self._insert_thread(session_id, "old-provider", "待恢复")
+        rollout = self._write_session(session_id, "old-provider")
+        original = migrator.scan_sessions(self.codex_home)
+        record = next(item for item in original.sessions if item.session_id == session_id)
+        migration = migrator.migrate_sessions(original, [record], "new-provider")
+        backup = migrator.load_backup_info(migration.backup_dir, self.codex_home)
+
+        current_backup = migrator.restore_backup(backup, self.codex_home, self.state_db)
+
+        self.assertEqual(migrator._read_session_meta(rollout)["model_provider"], "old-provider")
+        self.assertEqual(
+            migrator.load_thread_records(self.state_db)[session_id].model_provider,
+            "old-provider",
+        )
+        rollback = migrator.load_backup_info(current_backup, self.codex_home)
+        self.assertEqual(rollback.manifest["operation"], "pre_restore_backup")
+
+    def test_corrupted_backup_is_rejected_before_restore(self) -> None:
+        session_id = "corrupt-backup-session"
+        self._insert_thread(session_id, "old-provider", "待校验")
+        self._write_session(session_id, "old-provider")
+        result = migrator.scan_sessions(self.codex_home)
+        record = next(item for item in result.sessions if item.session_id == session_id)
+        migration = migrator.migrate_sessions(result, [record], "new-provider")
+        database_backup = migration.backup_dir / "state_5.sqlite"
+        database_backup.write_bytes(database_backup.read_bytes() + b"corrupted")
+
+        with self.assertRaises(migrator.ToolError):
+            migrator.load_backup_info(migration.backup_dir, self.codex_home)
+
 
 if __name__ == "__main__":
     unittest.main()

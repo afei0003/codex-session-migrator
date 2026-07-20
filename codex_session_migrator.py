@@ -96,6 +96,14 @@ class MigrationResult:
 
 
 @dataclass(frozen=True)
+class BackupInfo:
+    """已验证、可用于恢复的一份迁移备份。"""
+
+    backup_dir: Path
+    manifest: dict[str, object]
+
+
+@dataclass(frozen=True)
 class _ParsedSession:
     """尚未与 SQLite 合并的 JSONL 元数据。"""
 
@@ -649,8 +657,8 @@ def _backup_selected_sessions(
         manifest_sessions.append(
             {
                 "session_id": session.session_id,
-                "rollout_path": str(relative_path),
-                "backup_path": str(destination.relative_to(backup_dir)),
+                "rollout_path": relative_path.as_posix(),
+                "backup_path": destination.relative_to(backup_dir).as_posix(),
                 "from_provider": session.provider,
                 "to_provider": target_provider,
                 "sha256": _sha256(destination),
@@ -828,6 +836,217 @@ def ensure_codex_not_running() -> None:
         raise ToolError(f"检测到 Codex 正在运行（{', '.join(processes)}），请彻底关闭后再迁移")
 
 
+def _migration_backups_root(codex_home: Path) -> Path:
+    return codex_home / "backups" / "provider-migrations"
+
+
+def _safe_relative_path(value: object, description: str) -> Path:
+    if not isinstance(value, str) or not value:
+        raise ToolError(f"备份清单缺少 {description}")
+    path = Path(value.replace("\\", "/"))
+    if path.is_absolute() or ".." in path.parts:
+        raise ToolError(f"备份清单中的 {description} 不是安全相对路径：{value}")
+    return path
+
+
+def load_backup_info(backup_dir: Path, codex_home: Path) -> BackupInfo:
+    """加载并验证备份清单、哈希和恢复目标，拒绝跨目录恢复。"""
+    resolved_dir = backup_dir.expanduser().resolve()
+    manifest_path = resolved_dir / "manifest.json"
+    if not manifest_path.is_file():
+        raise ToolError(f"备份目录不包含 manifest.json：{resolved_dir}")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ToolError(f"无法读取备份清单：{manifest_path}") from error
+    if not isinstance(manifest, dict) or manifest.get("format_version") != 1:
+        raise ToolError(f"不支持的备份清单格式：{manifest_path}")
+
+    manifest_home = manifest.get("codex_home")
+    if not isinstance(manifest_home, str):
+        raise ToolError("备份清单缺少 codex_home")
+    if Path(manifest_home).expanduser().resolve() != codex_home.resolve():
+        raise ToolError("备份属于其他 Codex 数据目录，拒绝恢复")
+
+    database_name = _safe_relative_path(manifest.get("database_backup"), "database_backup")
+    database_path = resolved_dir / database_name
+    if not database_path.is_file():
+        raise ToolError(f"备份数据库不存在：{database_path}")
+    expected_database_hash = manifest.get("database_sha256")
+    if not isinstance(expected_database_hash, str) or _sha256(database_path) != expected_database_hash:
+        raise ToolError(f"备份数据库哈希校验失败：{database_path}")
+
+    sessions = manifest.get("sessions")
+    if not isinstance(sessions, list) or not sessions:
+        raise ToolError("备份清单不包含会话文件")
+    for session in sessions:
+        if not isinstance(session, dict):
+            raise ToolError("备份清单包含无效会话项")
+        source = resolved_dir / _safe_relative_path(session.get("backup_path"), "backup_path")
+        destination = codex_home / _safe_relative_path(session.get("rollout_path"), "rollout_path")
+        expected_hash = session.get("sha256")
+        if not source.is_file() or not isinstance(expected_hash, str) or _sha256(source) != expected_hash:
+            raise ToolError(f"会话备份哈希校验失败：{source}")
+        if not destination.is_file():
+            raise ToolError(f"当前会话文件不存在，拒绝覆盖：{destination}")
+    return BackupInfo(resolved_dir, manifest)
+
+
+def list_backups(codex_home: Path) -> list[BackupInfo]:
+    """列出可验证、可恢复的备份；损坏备份不会进入选择菜单。"""
+    root = _migration_backups_root(codex_home)
+    if not root.is_dir():
+        return []
+    backups: list[BackupInfo] = []
+    for directory in sorted((path for path in root.iterdir() if path.is_dir()), reverse=True):
+        try:
+            backups.append(load_backup_info(directory, codex_home))
+        except ToolError:
+            continue
+    return backups
+
+
+def choose_backup_interactively(
+    backups: Sequence[BackupInfo], input_fn: Callable[[str], str] = input
+) -> BackupInfo:
+    if not backups:
+        raise ToolError("没有找到可恢复的有效备份")
+    print("可恢复备份：")
+    for index, backup in enumerate(backups, start=1):
+        created_at = backup.manifest.get("created_at", "未知时间")
+        sessions = backup.manifest.get("sessions", [])
+        target = backup.manifest.get("target_provider", "未知 provider")
+        print(f"[{index}] {backup.backup_dir.name} | {created_at} | {len(sessions)} 条 | {target}")
+    indexes = parse_number_selection(input_fn("选择一个备份编号："), len(backups))
+    if len(indexes) != 1:
+        raise ToolError("一次只能恢复一个备份")
+    return backups[indexes[0] - 1]
+
+
+def _backup_current_state_for_restore(
+    codex_home: Path, state_db: Path, source_backup: BackupInfo
+) -> BackupInfo:
+    """在恢复前保存当前状态，以便恢复失败时回退。"""
+    backup_id = f"{datetime.now().astimezone().strftime('%Y%m%dT%H%M%S%f%z')}-before-restore"
+    backup_dir = _migration_backups_root(codex_home) / backup_id
+    backup_dir.mkdir(parents=True, exist_ok=False)
+    sessions_root = backup_dir / "sessions"
+    manifest_sessions: list[dict[str, str]] = []
+
+    source_sessions = source_backup.manifest["sessions"]
+    assert isinstance(source_sessions, list)
+    for item in source_sessions:
+        assert isinstance(item, dict)
+        rollout_relative = _safe_relative_path(item.get("rollout_path"), "rollout_path")
+        source = codex_home / rollout_relative
+        destination = sessions_root / rollout_relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        session_id = item.get("session_id")
+        manifest_sessions.append(
+            {
+                "session_id": str(session_id or ""),
+                "rollout_path": rollout_relative.as_posix(),
+                "backup_path": destination.relative_to(backup_dir).as_posix(),
+                "from_provider": str(_read_session_meta(source).get("model_provider") or ""),
+                "to_provider": str(item.get("from_provider") or ""),
+                "sha256": _sha256(destination),
+            }
+        )
+
+    database_backup = backup_dir / "state_5.sqlite"
+    _copy_sqlite_snapshot(state_db, database_backup)
+    manifest = {
+        "format_version": 1,
+        "operation": "pre_restore_backup",
+        "created_at": datetime.now().astimezone().isoformat(),
+        "codex_home": str(codex_home),
+        "state_db": str(state_db),
+        "database_backup": database_backup.name,
+        "database_sha256": _sha256(database_backup),
+        "target_provider": "pre_restore_snapshot",
+        "sessions": manifest_sessions,
+    }
+    (backup_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return load_backup_info(backup_dir, codex_home)
+
+
+def _apply_backup_snapshot(backup: BackupInfo, codex_home: Path, state_db: Path) -> None:
+    """写入一份已经验证的备份，不创建额外备份。"""
+    sessions = backup.manifest["sessions"]
+    assert isinstance(sessions, list)
+    for item in sessions:
+        assert isinstance(item, dict)
+        source = backup.backup_dir / _safe_relative_path(item.get("backup_path"), "backup_path")
+        destination = codex_home / _safe_relative_path(item.get("rollout_path"), "rollout_path")
+        _atomic_write_bytes(destination, source.read_bytes())
+    database_backup = backup.backup_dir / _safe_relative_path(
+        backup.manifest.get("database_backup"), "database_backup"
+    )
+    _restore_database_snapshot(database_backup, state_db)
+
+
+def _verify_restored_backup(backup: BackupInfo, codex_home: Path, state_db: Path) -> None:
+    """校验恢复后的 JSONL 哈希及 Session provider。"""
+    threads = load_thread_records(state_db)
+    sessions = backup.manifest["sessions"]
+    assert isinstance(sessions, list)
+    for item in sessions:
+        assert isinstance(item, dict)
+        source = backup.backup_dir / _safe_relative_path(item.get("backup_path"), "backup_path")
+        destination = codex_home / _safe_relative_path(item.get("rollout_path"), "rollout_path")
+        if _sha256(source) != _sha256(destination):
+            raise ToolError(f"恢复后 JSONL 哈希不一致：{destination}")
+        session_id = item.get("session_id")
+        from_provider = item.get("from_provider")
+        if isinstance(session_id, str) and isinstance(from_provider, str) and from_provider:
+            payload = _read_session_meta(destination)
+            thread = threads.get(session_id)
+            if payload.get("model_provider") != from_provider or thread is None or thread.model_provider != from_provider:
+                raise ToolError(f"恢复后 provider 校验失败：{session_id}")
+
+
+def restore_backup(backup: BackupInfo, codex_home: Path, state_db: Path) -> Path:
+    """恢复备份；若失败则从恢复前快照回退。"""
+    current_backup = _backup_current_state_for_restore(codex_home, state_db, backup)
+    try:
+        _apply_backup_snapshot(backup, codex_home, state_db)
+        _verify_restored_backup(backup, codex_home, state_db)
+    except Exception as error:
+        restore_errors: list[str] = []
+        try:
+            _apply_backup_snapshot(current_backup, codex_home, state_db)
+        except (OSError, sqlite3.Error, ToolError, json.JSONDecodeError) as restore_error:
+            restore_errors.append(str(restore_error))
+        if restore_errors:
+            raise ToolError(
+                f"恢复失败且自动回退不完整，请使用恢复前备份：{current_backup.backup_dir}"
+            ) from error
+        if isinstance(error, ToolError):
+            raise
+        raise ToolError(f"恢复失败，已回退到恢复前状态：{error}") from error
+    return current_backup.backup_dir
+
+
+def print_restore_preview(backup: BackupInfo) -> None:
+    created_at = backup.manifest.get("created_at", "未知时间")
+    target = backup.manifest.get("target_provider", "未知 provider")
+    sessions = backup.manifest.get("sessions", [])
+    print("恢复预览：")
+    print(f"- 备份：{backup.backup_dir.name}")
+    print(f"- 创建时间：{created_at}")
+    print(f"- 会话数量：{len(sessions)}")
+    print(f"- 备份目标 provider：{target}")
+    for item in sessions:
+        if isinstance(item, dict):
+            print(
+                f"  - {item.get('session_id', '未知 Session ID')} | "
+                f"恢复为 {item.get('from_provider', '未知 provider')}"
+            )
+
+
 def _add_scan_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--codex-home", type=Path, help="Codex 数据目录，默认 ~/.codex")
     parser.add_argument("--state-db", type=Path, help="显式指定 state_5.sqlite")
@@ -855,8 +1074,11 @@ def build_parser() -> argparse.ArgumentParser:
     migrate_parser.add_argument("--to-provider", help="目标 provider（区分大小写）")
     migrate_parser.add_argument("--dry-run", action="store_true", help="仅预览，不检查进程且不写入")
 
-    restore_parser = subparsers.add_parser("restore", help="从迁移备份恢复会话（后续实现）")
+    restore_parser = subparsers.add_parser("restore", help="从迁移备份恢复会话")
+    restore_parser.add_argument("--codex-home", type=Path, help="Codex 数据目录，默认 ~/.codex")
+    restore_parser.add_argument("--state-db", type=Path, help="显式指定 state_5.sqlite")
     restore_parser.add_argument("--backup", type=Path, help="备份目录")
+    restore_parser.add_argument("--dry-run", action="store_true", help="仅校验并预览，不检查进程且不写入")
     return parser
 
 
@@ -934,6 +1156,33 @@ def run_migrate_preview(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_restore(args: argparse.Namespace) -> int:
+    codex_home = (args.codex_home or _default_codex_home()).expanduser().resolve()
+    if not codex_home.is_dir():
+        raise ToolError(f"找不到 Codex 数据目录：{codex_home}")
+    state_db = locate_state_db(codex_home, args.state_db)
+    backup = (
+        load_backup_info(args.backup, codex_home)
+        if args.backup
+        else choose_backup_interactively(list_backups(codex_home))
+    )
+    print_restore_preview(backup)
+    if args.dry_run:
+        print("\n--dry-run：仅完成备份校验与预览，未检查进程且未写入数据。")
+        return 0
+
+    ensure_codex_not_running()
+    expected_confirmation = f"RESTORE {backup.backup_dir.name}"
+    confirmation = input(f"输入 {expected_confirmation} 以备份当前状态并恢复：")
+    if confirmation.strip() != expected_confirmation:
+        print("确认短语不匹配，已取消，未写入任何数据。")
+        return 0
+    rollback_backup = restore_backup(backup, codex_home, state_db)
+    print("\n恢复完成，JSONL 与 SQLite 已通过校验。")
+    print(f"恢复前状态备份：{rollback_backup}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """运行命令行入口。无子命令时进入交互选择。"""
     if hasattr(sys.stdout, "reconfigure"):
@@ -951,8 +1200,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "migrate":
             return run_migrate_preview(args)
         if args.command == "restore":
-            print("restore 功能将在第 4 阶段实现。")
-            return 0
+            return run_restore(args)
         parser.print_help()
         return 0
     except (ToolError, OSError, sqlite3.Error) as error:

@@ -28,6 +28,8 @@ python codex_session_migrator.py list --provider OpenAI
 python codex_session_migrator.py migrate
 python codex_session_migrator.py migrate --session-id <SESSION_ID>
 python codex_session_migrator.py migrate --session-id <SESSION_ID> --to-provider custom --dry-run
+python codex_session_migrator.py restore
+python codex_session_migrator.py restore --backup <备份目录> --dry-run
 ```
 
 `list` 只读列出会话。`migrate` 会先按日期和编号选择会话，再选择目标 provider，展示逐条预览。`--to-provider` 可跳过目标 provider 菜单；`--dry-run` 始终只预览，不检查进程也不写入。
@@ -49,6 +51,12 @@ python codex_session_migrator.py migrate --session-id <SESSION_ID> --to-provider
 - 包含哈希、源路径、旧 provider 和目标 provider 的 `manifest.json`。
 
 随后工具在 SQLite 事务中按 Session ID 和旧 provider 更新 `threads` 表，并原子替换对应 JSONL 的 `session_meta.model_provider`。任一受控步骤失败时，会回滚数据库并恢复已经替换的 JSONL；成功后会重新读取 JSONL 和 SQLite 验证一致性。
+
+## 恢复备份
+
+`restore` 默认列出 `~/.codex/backups/provider-migrations/` 中哈希校验通过的备份，也可以用 `--backup` 指定目录。恢复只允许作用于备份记录的同一份 Codex 数据目录，且会检查每个备份 JSONL 与数据库快照的 SHA-256。
+
+恢复前必须关闭 Codex，并输入 `RESTORE <备份目录名>`。工具会先创建“恢复前状态”备份；若恢复过程失败，会自动尝试回退到该状态。恢复完成后会校验 JSONL 内容哈希，以及每条 Session 的 JSONL 与 SQLite provider 是否一致。
 
 ## 安全原则
 
