@@ -208,8 +208,16 @@ def create_app(default_home: Path | None = None, default_state_db: Path | None =
 
         with gr.Tab("扫描与迁移"):
             with gr.Row():
-                date_from = gr.Textbox(label="起始日期（YYYY-MM-DD）")
-                date_to = gr.Textbox(label="结束日期（YYYY-MM-DD）")
+                date_from = gr.DateTime(
+                    label="起始日期",
+                    include_time=False,
+                    type="string",
+                )
+                date_to = gr.DateTime(
+                    label="结束日期",
+                    include_time=False,
+                    type="string",
+                )
                 provider_filter = gr.Textbox(label="当前 provider 筛选（区分大小写）")
             session_ids = gr.Textbox(label="Session ID 筛选（多个 ID 用空格、逗号或换行分隔）", lines=2)
             include_archived = gr.Checkbox(label="包含已归档会话", value=False)
@@ -222,6 +230,7 @@ def create_app(default_home: Path | None = None, default_state_db: Path | None =
                 type="array",
                 interactive=True,
                 label="会话列表（仅勾选第一列）",
+                column_widths=[60, 100, 300, 180, 140, 120, 90, 90, 260],
             )
             with gr.Row():
                 target_provider = gr.Dropdown(label="目标 provider", choices=[], allow_custom_value=True)

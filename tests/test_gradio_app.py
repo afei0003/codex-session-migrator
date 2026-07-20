@@ -57,6 +57,24 @@ class GradioAppTests(unittest.TestCase):
         ]
         self.assertEqual(gradio_app._selected_ids(rows), ["selected-session"])
 
+    def test_session_table_has_date_pickers_and_title_width(self) -> None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ResourceWarning)
+            app = gradio_app.create_app()
+            try:
+                components = app.config["components"]
+                date_pickers = [item for item in components if item["type"] == "datetime"]
+                session_table = next(
+                    item
+                    for item in components
+                    if item["type"] == "dataframe"
+                    and item["props"].get("label") == "会话列表（仅勾选第一列）"
+                )
+                self.assertEqual(len(date_pickers), 2)
+                self.assertEqual(session_table["props"]["column_widths"][3], "180px")
+            finally:
+                app.close()
+
 
 if __name__ == "__main__":
     unittest.main()

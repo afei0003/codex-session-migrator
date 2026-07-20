@@ -73,6 +73,20 @@ class WebWorkflowTests(unittest.TestCase):
         self.assertTrue(scan.rows[0]["可迁移"])
         self.assertIn("custom", scan.providers)
 
+    def test_scan_rows_truncate_long_titles_and_accept_calendar_timestamp(self) -> None:
+        title = "123456789012345678901"
+        self._insert_thread("long-title", "openai", title)
+        self._write_session("long-title", "openai")
+        request = web_workflows.build_scan_request(
+            self.codex_home,
+            self.state_db,
+            date_from="2026-07-20T00:00:00",
+        )
+
+        scan = web_workflows.scan_for_web(request)
+
+        self.assertEqual(scan.rows[0]["标题"], "1234567890123456789…")
+
     def test_preview_rejects_unselectable_session(self) -> None:
         self._insert_thread("missing-provider", "old", "异常会话")
         self._write_session("missing-provider", None)

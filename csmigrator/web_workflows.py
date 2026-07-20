@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +12,7 @@ from .models import BackupInfo, ScanResult, SessionRecord, ToolError
 from .process_guard import ensure_codex_not_running
 from .restore import list_backups, load_backup_info, restore_backup
 from .scanner import default_codex_home, filter_sessions, locate_state_db, scan_sessions
-from .selection import discover_providers, validate_provider
+from .selection import discover_providers, short_title, validate_provider
 
 
 @dataclass(frozen=True)
@@ -43,7 +43,7 @@ class WebScanResult:
                 "选择": False,
                 "日期": session.session_date.isoformat(),
                 "Session ID": session.session_id,
-                "标题": session.title,
+                "标题": short_title(session.title, limit=20),
                 "当前 provider": session.provider,
                 "状态": session.status,
                 "可迁移": session.selectable,
@@ -121,8 +121,11 @@ def _optional_date(value: str | date | None, label: str) -> date | None:
         return value
     try:
         return date.fromisoformat(value)
-    except ValueError as error:
-        raise ToolError(f"{label} 必须使用 YYYY-MM-DD 格式") from error
+    except ValueError:
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+        except ValueError as error:
+            raise ToolError(f"{label} 必须使用 YYYY-MM-DD 格式") from error
 
 
 def parse_session_ids(value: str | None) -> tuple[str, ...]:
