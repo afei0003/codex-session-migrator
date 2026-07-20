@@ -1,6 +1,6 @@
 # Codex Session Provider Migrator
 
-一个用于扫描、迁移和恢复 Codex 本地会话 `model_provider` 的安全命令行工具。
+一个用于扫描、迁移和恢复 Codex 本地会话 `model_provider` 的安全工具，提供命令行和仅本机可访问的 Web 界面。
 
 > 当前版本已支持扫描、选择、迁移、备份和恢复。
 
@@ -15,6 +15,8 @@
 - `restore.py`：备份校验与恢复；
 - `process_guard.py`：写入前的 Codex 进程保护；
 - `cli.py`：命令行参数和流程编排。
+- `web_workflows.py`：供 Web 界面调用的扫描、预览、迁移与恢复编排；
+- `gradio_app.py`：仅监听本机地址的 Gradio 启动入口。
 
 原有调用方式保持不变；也可以使用 `python -m csmigrator --help`。
 
@@ -25,12 +27,45 @@
 - 写入前展示逐条变更并要求明确确认。
 - 每次迁移前创建可验证、可恢复的完整备份。
 - 检测到 Codex 正在运行时拒绝修改用户数据。
-- 仅使用 Python 标准库，支持 Windows、macOS 和 Linux。
+- 核心命令行仅使用 Python 标准库，支持 Windows、macOS 和 Linux。
 
 ## 环境要求
 
 - Python 3.11 或更高版本
 - Codex 本地数据目录，默认位置为 `~/.codex`
+- 使用 Web 界面时，需要安装 `requirements.txt` 中的 Gradio 依赖。
+
+## 本机 Web 界面
+
+Web 界面仅监听 `127.0.0.1`，不会创建公开链接，也不会暴露给局域网。它直接调用与 CLI 相同的安全业务层，不会通过网页执行 Shell 命令。
+
+首次使用时，在项目目录创建虚拟环境并安装依赖：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+启动页面：
+
+```powershell
+.\.venv\Scripts\python.exe gradio_app.py
+```
+
+浏览器会自动打开 `http://127.0.0.1:7860`。如需改用端口或不自动打开浏览器：
+
+```powershell
+.\.venv\Scripts\python.exe gradio_app.py --port 7861 --no-browser
+```
+
+页面包含两个标签页：
+
+1. **扫描与迁移**：填写筛选条件，点击“扫描会话”，在表格第一列勾选状态为“可迁移”的会话，选择或输入目标 provider，生成预览后输入页面给出的 `MIGRATE <数量>`，再点击“执行迁移”。
+2. **备份恢复**：点击“刷新可恢复备份”，勾选一份备份，生成恢复预览后输入页面给出的 `RESTORE <备份ID>`，再点击“执行恢复”。
+
+扫描、刷新备份和生成预览都不会写入数据。迁移与恢复前仍必须彻底关闭 Codex；页面检测到 Codex 正在运行时会拒绝写入。所有结果、错误信息和备份路径都会显示在页面中。
+
+如果你的环境设置了 SOCKS 代理，`requirements.txt` 已通过 `httpx[socks]` 安装所需的 `socksio` 支持；请始终使用项目 `.venv` 中的 Python 启动页面。
 
 ## 扫描与选择
 
@@ -289,8 +324,8 @@ MIGRATE 1
 ## 测试
 
 ```powershell
-python -m py_compile codex_session_migrator.py
-python -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m py_compile codex_session_migrator.py gradio_app.py
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 git diff --check
 ```
 
