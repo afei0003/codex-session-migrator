@@ -2,7 +2,7 @@
 
 一个用于扫描、迁移和恢复 Codex 本地会话 `model_provider` 的安全命令行工具。
 
-> 当前版本已支持扫描、选择、备份和迁移；备份恢复命令将在后续提交中实现。
+> 当前版本已支持扫描、选择、迁移、备份和恢复。
 
 ## 设计目标
 
@@ -38,6 +38,8 @@ python codex_session_migrator.py restore --backup <备份目录> --dry-run
 
 只有 JSONL 和数据库中的 provider 都存在且完全一致的会话，才可以进入选择列表。解析失败、旧格式缺字段、数据库缺失或两端 provider 不一致的会话会被报告并跳过。
 
+`model_provider` 名称区分大小写，例如 `OpenAI` 与 `openai` 是两个不同分组。目标 provider 可以从检测列表选择，也可以手工输入；手工输入时请使用配置中的精确名称。
+
 ## 迁移写入流程
 
 真实迁移前，请彻底关闭 Codex。工具会检测 `Codex` 进程；检测到运行时将拒绝写入。
@@ -58,17 +60,28 @@ python codex_session_migrator.py restore --backup <备份目录> --dry-run
 
 恢复前必须关闭 Codex，并输入 `RESTORE <备份目录名>`。工具会先创建“恢复前状态”备份；若恢复过程失败，会自动尝试回退到该状态。恢复完成后会校验 JSONL 内容哈希，以及每条 Session 的 JSONL 与 SQLite provider 是否一致。
 
+备份不能恢复到另一份 Codex 数据目录：SQLite 快照内包含本机的会话路径，因此工具会校验 `manifest.json` 中的 `codex_home` 并拒绝跨目录写入。
+
+## 推荐操作顺序
+
+1. 先运行 `list`，确认目标 Session ID、标题和当前 provider。
+2. 用 `migrate --session-id ... --to-provider ... --dry-run` 检查预览。
+3. 彻底关闭 Codex，再移除 `--dry-run` 执行真实迁移。
+4. 迁移后重启 Codex 验证；如需撤销，使用 `restore --dry-run` 检查备份，再执行恢复。
+
+## 测试
+
+```powershell
+python -m py_compile codex_session_migrator.py
+python -m unittest discover -s tests -v
+git diff --check
+```
+
+测试使用临时 `.codex` 目录，不读取或写入你的真实会话数据。
+
 ## 安全原则
 
 - 默认只读扫描，异常会话只报告、不自动修复。
 - 不提供一键迁移全部会话。
 - 迁移和恢复前必须关闭 Codex。
 - 写入前必须备份并确认，写入后必须验证 JSONL 与 SQLite 一致。
-
-## 开发检查
-
-```powershell
-python -m py_compile codex_session_migrator.py
-python codex_session_migrator.py --help
-python codex_session_migrator.py --version
-```

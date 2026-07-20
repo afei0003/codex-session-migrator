@@ -849,6 +849,15 @@ def _safe_relative_path(value: object, description: str) -> Path:
     return path
 
 
+def _manifest_sessions(manifest: dict[str, object]) -> list[dict[str, object]]:
+    sessions = manifest.get("sessions")
+    if not isinstance(sessions, list) or not sessions:
+        raise ToolError("备份清单不包含会话文件")
+    if not all(isinstance(session, dict) for session in sessions):
+        raise ToolError("备份清单包含无效会话项")
+    return sessions
+
+
 def load_backup_info(backup_dir: Path, codex_home: Path) -> BackupInfo:
     """加载并验证备份清单、哈希和恢复目标，拒绝跨目录恢复。"""
     resolved_dir = backup_dir.expanduser().resolve()
@@ -876,12 +885,7 @@ def load_backup_info(backup_dir: Path, codex_home: Path) -> BackupInfo:
     if not isinstance(expected_database_hash, str) or _sha256(database_path) != expected_database_hash:
         raise ToolError(f"备份数据库哈希校验失败：{database_path}")
 
-    sessions = manifest.get("sessions")
-    if not isinstance(sessions, list) or not sessions:
-        raise ToolError("备份清单不包含会话文件")
-    for session in sessions:
-        if not isinstance(session, dict):
-            raise ToolError("备份清单包含无效会话项")
+    for session in _manifest_sessions(manifest):
         source = resolved_dir / _safe_relative_path(session.get("backup_path"), "backup_path")
         destination = codex_home / _safe_relative_path(session.get("rollout_path"), "rollout_path")
         expected_hash = session.get("sha256")
@@ -933,10 +937,7 @@ def _backup_current_state_for_restore(
     sessions_root = backup_dir / "sessions"
     manifest_sessions: list[dict[str, str]] = []
 
-    source_sessions = source_backup.manifest["sessions"]
-    assert isinstance(source_sessions, list)
-    for item in source_sessions:
-        assert isinstance(item, dict)
+    for item in _manifest_sessions(source_backup.manifest):
         rollout_relative = _safe_relative_path(item.get("rollout_path"), "rollout_path")
         source = codex_home / rollout_relative
         destination = sessions_root / rollout_relative
@@ -975,10 +976,7 @@ def _backup_current_state_for_restore(
 
 def _apply_backup_snapshot(backup: BackupInfo, codex_home: Path, state_db: Path) -> None:
     """写入一份已经验证的备份，不创建额外备份。"""
-    sessions = backup.manifest["sessions"]
-    assert isinstance(sessions, list)
-    for item in sessions:
-        assert isinstance(item, dict)
+    for item in _manifest_sessions(backup.manifest):
         source = backup.backup_dir / _safe_relative_path(item.get("backup_path"), "backup_path")
         destination = codex_home / _safe_relative_path(item.get("rollout_path"), "rollout_path")
         _atomic_write_bytes(destination, source.read_bytes())
@@ -991,10 +989,7 @@ def _apply_backup_snapshot(backup: BackupInfo, codex_home: Path, state_db: Path)
 def _verify_restored_backup(backup: BackupInfo, codex_home: Path, state_db: Path) -> None:
     """校验恢复后的 JSONL 哈希及 Session provider。"""
     threads = load_thread_records(state_db)
-    sessions = backup.manifest["sessions"]
-    assert isinstance(sessions, list)
-    for item in sessions:
-        assert isinstance(item, dict)
+    for item in _manifest_sessions(backup.manifest):
         source = backup.backup_dir / _safe_relative_path(item.get("backup_path"), "backup_path")
         destination = codex_home / _safe_relative_path(item.get("rollout_path"), "rollout_path")
         if _sha256(source) != _sha256(destination):
@@ -1018,7 +1013,7 @@ def restore_backup(backup: BackupInfo, codex_home: Path, state_db: Path) -> Path
         restore_errors: list[str] = []
         try:
             _apply_backup_snapshot(current_backup, codex_home, state_db)
-        except (OSError, sqlite3.Error, ToolError, json.JSONDecodeError) as restore_error:
+        except Exception as restore_error:
             restore_errors.append(str(restore_error))
         if restore_errors:
             raise ToolError(

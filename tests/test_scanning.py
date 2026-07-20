@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import io
 import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -98,6 +100,10 @@ class ScanSessionsTests(unittest.TestCase):
         self.assertEqual(
             [record.session_id for record in migrator.filter_sessions(result.sessions)],
             [first_id],
+        )
+        self.assertEqual(
+            migrator.filter_sessions(result.sessions, provider="openai"),
+            [],
         )
 
     def test_malformed_rollout_is_reported_without_stopping_scan(self) -> None:
@@ -233,6 +239,70 @@ class ScanSessionsTests(unittest.TestCase):
 
         with self.assertRaises(migrator.ToolError):
             migrator.load_backup_info(migration.backup_dir, self.codex_home)
+
+    def test_backup_cannot_be_restored_to_another_codex_home(self) -> None:
+        session_id = "home-check-session"
+        self._insert_thread(session_id, "old-provider", "目录校验")
+        self._write_session(session_id, "old-provider")
+        result = migrator.scan_sessions(self.codex_home)
+        record = next(item for item in result.sessions if item.session_id == session_id)
+        migration = migrator.migrate_sessions(result, [record], "new-provider")
+        another_home = self.codex_home.parent / ".other-codex"
+        another_home.mkdir()
+
+        with self.assertRaises(migrator.ToolError):
+            migrator.load_backup_info(migration.backup_dir, another_home)
+
+    def test_dry_run_does_not_modify_selected_session(self) -> None:
+        session_id = "dry-run-session"
+        self._insert_thread(session_id, "old-provider", "只读预览")
+        rollout = self._write_session(session_id, "old-provider")
+
+        with redirect_stdout(io.StringIO()):
+            exit_code = migrator.main(
+                [
+                    "migrate",
+                    "--codex-home",
+                    str(self.codex_home),
+                    "--session-id",
+                    session_id,
+                    "--to-provider",
+                    "new-provider",
+                    "--dry-run",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(migrator._read_session_meta(rollout)["model_provider"], "old-provider")
+        self.assertEqual(
+            migrator.load_thread_records(self.state_db)[session_id].model_provider,
+            "old-provider",
+        )
+
+    def test_wrong_confirmation_does_not_modify_selected_session(self) -> None:
+        session_id = "confirmation-session"
+        self._insert_thread(session_id, "old-provider", "确认保护")
+        rollout = self._write_session(session_id, "old-provider")
+
+        with (
+            patch("builtins.input", return_value="MIGRATE 99"),
+            patch.object(migrator, "ensure_codex_not_running"),
+            redirect_stdout(io.StringIO()),
+        ):
+            exit_code = migrator.main(
+                [
+                    "migrate",
+                    "--codex-home",
+                    str(self.codex_home),
+                    "--session-id",
+                    session_id,
+                    "--to-provider",
+                    "new-provider",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(migrator._read_session_meta(rollout)["model_provider"], "old-provider")
 
 
 if __name__ == "__main__":
