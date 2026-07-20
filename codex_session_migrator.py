@@ -4,9 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import hashlib
 import json
+import os
+import shutil
 import sqlite3
+import subprocess
 import sys
+import tomllib
+import uuid
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import contextmanager
@@ -77,6 +84,15 @@ class ScanResult:
     state_db: Path
     sessions: tuple[SessionRecord, ...]
     issues: tuple[ScanIssue, ...]
+
+
+@dataclass(frozen=True)
+class MigrationResult:
+    """一次成功迁移的备份和变更摘要。"""
+
+    backup_dir: Path
+    session_ids: tuple[str, ...]
+    target_provider: str
 
 
 @dataclass(frozen=True)
@@ -474,6 +490,344 @@ def choose_sessions_interactively(
     return [candidates[index - 1] for index in session_indexes]
 
 
+def _configured_providers(codex_home: Path) -> set[str]:
+    """从 config.toml 提取已配置 provider；配置不可读时保留扫描结果。"""
+    config_path = codex_home / "config.toml"
+    if not config_path.is_file():
+        return set()
+    try:
+        with config_path.open("rb") as file:
+            config = tomllib.load(file)
+    except (OSError, tomllib.TOMLDecodeError):
+        return set()
+
+    providers: set[str] = set()
+    current = config.get("model_provider")
+    if isinstance(current, str) and current.strip():
+        providers.add(current.strip())
+    configured = config.get("model_providers")
+    if isinstance(configured, dict):
+        providers.update(
+            name.strip()
+            for name in configured
+            if isinstance(name, str) and name.strip()
+        )
+    return providers
+
+
+def discover_providers(result: ScanResult) -> list[str]:
+    """汇总配置、JSONL 与数据库中的精确 provider 名称。"""
+    providers = _configured_providers(result.codex_home)
+    for session in result.sessions:
+        if session.json_provider:
+            providers.add(session.json_provider)
+        if session.database_provider:
+            providers.add(session.database_provider)
+    return sorted(providers, key=lambda value: (value.casefold(), value))
+
+
+def validate_provider(value: str) -> str:
+    provider = value.strip()
+    if not provider:
+        raise ToolError("目标 provider 不能为空")
+    if any(character in provider for character in "\r\n\x00"):
+        raise ToolError("目标 provider 不能包含换行符或空字符")
+    return provider
+
+
+def choose_target_provider(
+    providers: Sequence[str], input_fn: Callable[[str], str] = input
+) -> str:
+    """让用户从已发现 provider 中选择或手工输入新值。"""
+    print("可用目标 provider：")
+    for index, provider in enumerate(providers, start=1):
+        print(f"[{index}] {provider}")
+    print("[m] 手工输入新的 provider")
+    choice = input_fn("选择目标 provider 编号，或输入 m：").strip()
+    if choice.casefold() == "m":
+        return validate_provider(input_fn("输入目标 provider（区分大小写）："))
+    try:
+        index = int(choice)
+    except ValueError as error:
+        raise ToolError("请输入 provider 编号，或输入 m") from error
+    if index < 1 or index > len(providers):
+        raise ToolError(f"provider 编号必须在 1 到 {len(providers)} 之间")
+    return providers[index - 1]
+
+
+def print_migration_preview(sessions: Sequence[SessionRecord], target_provider: str) -> None:
+    """输出逐条 provider 变更预览。"""
+    print("\n迁移预览：")
+    for index, session in enumerate(sessions, start=1):
+        print(
+            f"[{index:>3}] {session.session_id} | {_short_title(session.title)} | "
+            f"{session.provider} -> {target_provider}"
+        )
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for block in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _copy_sqlite_snapshot(source_path: Path, destination_path: Path) -> None:
+    """使用 SQLite Backup API 生成包含 WAL 数据的一致快照。"""
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    with open_readonly_sqlite(source_path) as source:
+        destination = sqlite3.connect(destination_path)
+        try:
+            source.backup(destination)
+        finally:
+            destination.close()
+
+
+def _atomic_write_bytes(path: Path, content: bytes) -> None:
+    """在目标同目录落盘后原子替换，避免生成半截 JSONL。"""
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_bytes(content)
+        shutil.copymode(path, temporary)
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _updated_session_json(path: Path, expected_provider: str, target_provider: str) -> bytes:
+    """只更新 session_meta 的 provider，其余 JSONL 行保持原始字节不变。"""
+    lines = path.read_bytes().splitlines(keepends=True)
+    for index, original_line in enumerate(lines[:MAX_META_LINES]):
+        if not original_line.strip():
+            continue
+        has_bom = index == 0 and original_line.startswith(b"\xef\xbb\xbf")
+        decoded = original_line.decode("utf-8-sig" if has_bom else "utf-8")
+        try:
+            record = json.loads(decoded)
+        except json.JSONDecodeError as error:
+            raise ToolError(f"无法更新 JSONL：{path}：{error.msg}") from error
+        if record.get("type") != "session_meta":
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            raise ToolError(f"无法更新 JSONL：session_meta payload 无效：{path}")
+        current_provider = payload.get("model_provider")
+        if current_provider != expected_provider:
+            raise ToolError(
+                f"JSONL provider 已变化，拒绝覆盖：{path}（当前为 {current_provider!r}）"
+            )
+        payload["model_provider"] = target_provider
+        suffix = b"\r\n" if original_line.endswith(b"\r\n") else b"\n"
+        encoded = json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        lines[index] = (b"\xef\xbb\xbf" if has_bom else b"") + encoded + suffix
+        return b"".join(lines)
+    raise ToolError(f"无法更新 JSONL：前 {MAX_META_LINES} 行内未找到 session_meta：{path}")
+
+
+def _backup_selected_sessions(
+    result: ScanResult,
+    sessions: Sequence[SessionRecord],
+    target_provider: str,
+) -> Path:
+    """保存选中 JSONL、数据库一致快照和恢复所需清单。"""
+    backup_id = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%f%z")
+    backup_dir = result.codex_home / "backups" / "provider-migrations" / backup_id
+    backup_dir.mkdir(parents=True, exist_ok=False)
+    backups_root = backup_dir / "sessions"
+    manifest_sessions: list[dict[str, str]] = []
+
+    for session in sessions:
+        try:
+            relative_path = session.rollout_path.relative_to(result.codex_home)
+        except ValueError as error:
+            raise ToolError(f"会话文件不在 Codex 目录内：{session.rollout_path}") from error
+        destination = backups_root / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(session.rollout_path, destination)
+        manifest_sessions.append(
+            {
+                "session_id": session.session_id,
+                "rollout_path": str(relative_path),
+                "backup_path": str(destination.relative_to(backup_dir)),
+                "from_provider": session.provider,
+                "to_provider": target_provider,
+                "sha256": _sha256(destination),
+            }
+        )
+
+    database_backup = backup_dir / "state_5.sqlite"
+    _copy_sqlite_snapshot(result.state_db, database_backup)
+    manifest = {
+        "format_version": 1,
+        "created_at": datetime.now().astimezone().isoformat(),
+        "codex_home": str(result.codex_home),
+        "state_db": str(result.state_db),
+        "database_backup": database_backup.name,
+        "database_sha256": _sha256(database_backup),
+        "target_provider": target_provider,
+        "sessions": manifest_sessions,
+    }
+    (backup_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return backup_dir
+
+
+def _restore_jsonl_from_backup(backup_dir: Path) -> None:
+    manifest_path = backup_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for item in manifest["sessions"]:
+        source = backup_dir / item["backup_path"]
+        destination = Path(manifest["codex_home"]) / item["rollout_path"]
+        _atomic_write_bytes(destination, source.read_bytes())
+
+
+def _restore_database_snapshot(backup_db: Path, state_db: Path) -> None:
+    source = _readonly_sqlite(backup_db)
+    destination = sqlite3.connect(state_db)
+    try:
+        source.backup(destination)
+    finally:
+        destination.close()
+        source.close()
+
+
+def migrate_sessions(
+    result: ScanResult,
+    sessions: Sequence[SessionRecord],
+    target_provider: str,
+) -> MigrationResult:
+    """备份并同步更新选中 JSONL 与 SQLite；失败时回退到备份。"""
+    if not sessions:
+        raise ToolError("没有可迁移的会话")
+    target_provider = validate_provider(target_provider)
+    invalid = [session.session_id for session in sessions if not session.selectable]
+    if invalid:
+        raise ToolError(f"异常会话不能迁移：{', '.join(invalid)}")
+
+    updates = {
+        session.rollout_path: _updated_session_json(
+            session.rollout_path, session.provider, target_provider
+        )
+        for session in sessions
+    }
+    backup_dir = _backup_selected_sessions(result, sessions, target_provider)
+    replaced_jsonl = False
+    connection = sqlite3.connect(result.state_db)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        for session in sessions:
+            cursor = connection.execute(
+                "UPDATE threads SET model_provider = ? "
+                "WHERE id = ? AND model_provider = ?",
+                (target_provider, session.session_id, session.provider),
+            )
+            if cursor.rowcount != 1:
+                raise ToolError(f"数据库 provider 已变化，拒绝覆盖：{session.session_id}")
+        for path, content in updates.items():
+            _atomic_write_bytes(path, content)
+            replaced_jsonl = True
+        connection.commit()
+        _verify_migration(result.state_db, sessions, target_provider)
+    except Exception as error:
+        try:
+            connection.rollback()
+        except sqlite3.Error:
+            pass
+        restore_errors: list[str] = []
+        if replaced_jsonl:
+            try:
+                _restore_jsonl_from_backup(backup_dir)
+            except (OSError, ToolError, json.JSONDecodeError) as restore_error:
+                restore_errors.append(f"JSONL 恢复失败：{restore_error}")
+        try:
+            _restore_database_snapshot(backup_dir / "state_5.sqlite", result.state_db)
+        except (OSError, sqlite3.Error, ToolError) as restore_error:
+            restore_errors.append(f"SQLite 恢复失败：{restore_error}")
+        if restore_errors:
+            detail = "；".join(restore_errors)
+            raise ToolError(
+                f"迁移失败，自动回退不完整，请使用备份目录手工恢复：{backup_dir}（{detail}）"
+            ) from error
+        if isinstance(error, ToolError):
+            raise
+        raise ToolError(f"迁移失败，已从备份回退：{error}") from error
+    finally:
+        connection.close()
+    return MigrationResult(backup_dir, tuple(session.session_id for session in sessions), target_provider)
+
+
+def _verify_migration(
+    state_db: Path, sessions: Sequence[SessionRecord], target_provider: str
+) -> None:
+    threads = load_thread_records(state_db)
+    for session in sessions:
+        payload = _read_session_meta(session.rollout_path)
+        json_provider = payload.get("model_provider")
+        db_provider = threads.get(session.session_id)
+        if json_provider != target_provider or db_provider is None or db_provider.model_provider != target_provider:
+            raise ToolError(f"写入后验证失败：{session.session_id}")
+
+
+def find_running_codex_processes() -> list[str]:
+    """返回可能写入 Codex 数据的客户端进程名称。"""
+    candidates = {"codex", "codex.exe", "codex-desktop", "codex-desktop.exe"}
+    try:
+        if os.name == "nt":
+            completed = subprocess.run(
+                ["tasklist", "/FO", "CSV", "/NH"],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if completed.returncode == 0:
+                names = [row[0] for row in csv.reader(completed.stdout.splitlines()) if row]
+            else:
+                fallback = subprocess.run(
+                    [
+                        "powershell",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        "Get-Process | Select-Object -ExpandProperty ProcessName",
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                if fallback.returncode != 0:
+                    raise ToolError("无法检测 Codex 进程，拒绝写入以保护会话数据")
+                names = [line.strip() for line in fallback.stdout.splitlines() if line.strip()]
+                completed = fallback
+        else:
+            completed = subprocess.run(
+                ["ps", "-A", "-o", "comm="],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            names = [Path(line.strip()).name for line in completed.stdout.splitlines() if line.strip()]
+    except OSError as error:
+        raise ToolError(f"无法检测 Codex 进程：{error}") from error
+    if completed.returncode != 0:
+        raise ToolError("无法检测 Codex 进程，拒绝写入以保护会话数据")
+    return list(dict.fromkeys(name for name in names if name.casefold() in candidates))
+
+
+def ensure_codex_not_running() -> None:
+    processes = find_running_codex_processes()
+    if processes:
+        raise ToolError(f"检测到 Codex 正在运行（{', '.join(processes)}），请彻底关闭后再迁移")
+
+
 def _add_scan_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--codex-home", type=Path, help="Codex 数据目录，默认 ~/.codex")
     parser.add_argument("--state-db", type=Path, help="显式指定 state_5.sqlite")
@@ -496,8 +850,10 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser = subparsers.add_parser("list", help="扫描并列出 Codex 会话")
     _add_scan_arguments(list_parser)
 
-    migrate_parser = subparsers.add_parser("migrate", help="选择待迁移会话（当前仅预览）")
+    migrate_parser = subparsers.add_parser("migrate", help="预览并迁移会话 provider")
     _add_scan_arguments(migrate_parser)
+    migrate_parser.add_argument("--to-provider", help="目标 provider（区分大小写）")
+    migrate_parser.add_argument("--dry-run", action="store_true", help="仅预览，不检查进程且不写入")
 
     restore_parser = subparsers.add_parser("restore", help="从迁移备份恢复会话（后续实现）")
     restore_parser.add_argument("--backup", type=Path, help="备份目录")
@@ -549,10 +905,32 @@ def run_migrate_preview(args: argparse.Namespace) -> int:
         print(f"活动数据库：{result.state_db}\n")
         selected = choose_sessions_interactively(filtered)
 
-    print("\n已选择的会话（本阶段只读预览，不会写入）：")
-    print_sessions(selected)
-    print("\n下一阶段将要求选择目标 provider，并在确认后执行迁移。")
+    target_provider = (
+        validate_provider(args.to_provider)
+        if args.to_provider
+        else choose_target_provider(discover_providers(result))
+    )
+    changes = [session for session in selected if session.provider != target_provider]
+    if not changes:
+        print("所有选中会话已属于目标 provider，未执行任何写入。")
+        return 0
+
+    print_migration_preview(changes, target_provider)
     print_issues(result.issues)
+    if args.dry_run:
+        print("\n--dry-run：仅完成预览，未检查进程且未写入数据。")
+        return 0
+
+    ensure_codex_not_running()
+    expected_confirmation = f"MIGRATE {len(changes)}"
+    confirmation = input(f"输入 {expected_confirmation} 以创建备份并执行迁移：")
+    if confirmation.strip() != expected_confirmation:
+        print("确认短语不匹配，已取消，未写入任何数据。")
+        return 0
+
+    migration = migrate_sessions(result, changes, target_provider)
+    print("\n迁移完成，JSONL 与 SQLite 已通过写后校验。")
+    print(f"备份目录：{migration.backup_dir}")
     return 0
 
 

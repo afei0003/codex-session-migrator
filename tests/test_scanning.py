@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -122,6 +124,83 @@ class ScanSessionsTests(unittest.TestCase):
         legacy.parent.mkdir()
         self._create_database(legacy)
         self.assertEqual(migrator.locate_state_db(self.codex_home), self.state_db.resolve())
+
+    def test_discover_providers_merges_config_and_session_history(self) -> None:
+        session_id = "provider-session"
+        self._insert_thread(session_id, "history-provider", "历史")
+        self._write_session(session_id, "history-provider")
+        (self.codex_home / "config.toml").write_text(
+            'model_provider = "current-provider"\n[model_providers.extra-provider]\n',
+            encoding="utf-8",
+        )
+
+        providers = migrator.discover_providers(migrator.scan_sessions(self.codex_home))
+
+        self.assertEqual(
+            providers,
+            ["current-provider", "extra-provider", "history-provider"],
+        )
+
+    def test_migration_updates_jsonl_and_database_and_creates_backup(self) -> None:
+        session_id = "migrate-session"
+        self._insert_thread(session_id, "old-provider", "待迁移")
+        rollout = self._write_session(session_id, "old-provider")
+        result = migrator.scan_sessions(self.codex_home)
+        session = next(record for record in result.sessions if record.session_id == session_id)
+
+        migration = migrator.migrate_sessions(result, [session], "new-provider")
+
+        self.assertEqual(
+            migrator._read_session_meta(rollout)["model_provider"], "new-provider"
+        )
+        self.assertEqual(
+            migrator.load_thread_records(self.state_db)[session_id].model_provider,
+            "new-provider",
+        )
+        manifest = json.loads((migration.backup_dir / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["target_provider"], "new-provider")
+        self.assertEqual(manifest["sessions"][0]["from_provider"], "old-provider")
+
+    def test_guarded_database_update_rolls_back_when_provider_changes(self) -> None:
+        first_id = "first-migrate"
+        second_id = "second-migrate"
+        self._insert_thread(first_id, "old-provider", "第一条")
+        self._insert_thread(second_id, "old-provider", "第二条")
+        first_path = self._write_session(first_id, "old-provider")
+        second_path = self._write_session(second_id, "old-provider")
+        result = migrator.scan_sessions(self.codex_home)
+        records = {record.session_id: record for record in result.sessions}
+        connection = sqlite3.connect(self.state_db)
+        connection.execute(
+            "UPDATE threads SET model_provider = ? WHERE id = ?",
+            ("concurrent-provider", second_id),
+        )
+        connection.commit()
+        connection.close()
+
+        with self.assertRaises(migrator.ToolError):
+            migrator.migrate_sessions(
+                result,
+                [records[first_id], records[second_id]],
+                "new-provider",
+            )
+
+        threads = migrator.load_thread_records(self.state_db)
+        self.assertEqual(threads[first_id].model_provider, "old-provider")
+        self.assertEqual(threads[second_id].model_provider, "concurrent-provider")
+        self.assertEqual(migrator._read_session_meta(first_path)["model_provider"], "old-provider")
+        self.assertEqual(migrator._read_session_meta(second_path)["model_provider"], "old-provider")
+
+    def test_running_codex_process_is_detected(self) -> None:
+        completed = SimpleNamespace(returncode=0, stdout='"Codex.exe","123","Console","1","1 K"\n')
+        with patch.object(migrator.subprocess, "run", return_value=completed):
+            self.assertEqual(migrator.find_running_codex_processes(), ["Codex.exe"])
+
+    def test_process_detection_falls_back_to_powershell(self) -> None:
+        denied = SimpleNamespace(returncode=1, stdout="")
+        fallback = SimpleNamespace(returncode=0, stdout="codex\npython\n")
+        with patch.object(migrator.subprocess, "run", side_effect=[denied, fallback]):
+            self.assertEqual(migrator.find_running_codex_processes(), ["codex"])
 
 
 if __name__ == "__main__":
