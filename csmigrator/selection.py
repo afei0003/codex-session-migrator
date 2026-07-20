@@ -38,13 +38,23 @@ def short_title(value: str, limit: int = 54) -> str:
     return flattened if len(flattened) <= limit else f"{flattened[: limit - 1]}…"
 
 
+def display_working_directory(value: str) -> str:
+    """移除 Windows 扩展路径前缀，保持列表可读。"""
+    return value.removeprefix("\\\\?\\") or "(未知)"
+
+
 def print_sessions(sessions: Sequence[SessionRecord]) -> None:
     if not sessions:
         print("没有符合条件的会话。")
         return
     for index, session in enumerate(sessions, start=1):
         archived = " [已归档]" if session.archived else ""
-        print(f"[{index:>3}] {session.session_date.isoformat()} | {session.session_id} | {session.provider} | {session.status}{archived} | {short_title(session.title)}")
+        working_directory = display_working_directory(session.working_directory)
+        print(
+            f"[{index:>3}] {session.session_date.isoformat()} | {session.session_id} | "
+            f"{session.provider} | {session.status}{archived} | {short_title(session.title)} | "
+            f"工作目录：{working_directory}"
+        )
 
 
 def print_issues(issues: Sequence[ScanIssue]) -> None:

@@ -46,7 +46,7 @@ python codex_session_migrator.py restore
 python codex_session_migrator.py restore --backup <备份目录> --dry-run
 ```
 
-`list` 只读列出会话。`migrate` 会先按日期和编号选择会话，再选择目标 provider，展示逐条预览。`--to-provider` 可跳过目标 provider 菜单；`--dry-run` 始终只预览，不检查进程也不写入。
+`list` 只读列出会话；每条记录包含 Session ID、标题、当前 provider、状态和工作目录，便于区分来自不同项目的同名或相近会话。`migrate` 会先按日期和编号选择会话，再选择目标 provider，展示逐条预览。`--to-provider` 可跳过目标 provider 菜单；`--dry-run` 始终只预览，不检查进程也不写入。
 
 扫描会优先使用 `~/.codex/state_5.sqlite`，仅在它不存在时兼容旧位置 `~/.codex/sqlite/state_5.sqlite`。可用 `--codex-home` 或 `--state-db` 明确指定位置。
 
@@ -78,7 +78,7 @@ python codex_session_migrator.py restore --backup <备份目录> --dry-run
 
 ## 推荐操作顺序
 
-1. 先运行 `list`，确认目标 Session ID、标题和当前 provider。
+1. 先运行 `list`，确认目标 Session ID、标题、当前 provider 和工作目录。
 2. 用 `migrate --session-id ... --to-provider ... --dry-run` 检查预览。
 3. 彻底关闭 Codex，再移除 `--dry-run` 执行真实迁移。
 4. 迁移后重启 Codex 验证；如需撤销，使用 `restore --dry-run` 检查备份，再执行恢复。

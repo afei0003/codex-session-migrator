@@ -18,6 +18,7 @@ class ThreadRecord:
     session_id: str
     model_provider: str
     title: str
+    working_directory: str
     archived: bool
 
 
@@ -39,6 +40,7 @@ class SessionRecord:
     session_date: date
     timestamp: datetime | None
     title: str
+    working_directory: str
     json_provider: str | None
     database_provider: str | None
     rollout_path: Path

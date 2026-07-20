@@ -81,6 +81,31 @@ class ScanSessionsTests(unittest.TestCase):
         self.assertFalse(records[missing_provider_id].selectable)
         self.assertEqual(len(result.issues), 1)
 
+    def test_list_output_includes_working_directory(self) -> None:
+        session_id = "working-directory-session"
+        working_directory = r"D:\workspace\example-project"
+        connection = sqlite3.connect(self.state_db)
+        connection.execute("ALTER TABLE threads ADD COLUMN cwd TEXT")
+        connection.execute(
+            "INSERT INTO threads (id, model_provider, title, archived, cwd) VALUES (?, ?, ?, ?, ?)",
+            (session_id, "openai", "带工作目录的会话", 0, working_directory),
+        )
+        connection.commit()
+        connection.close()
+        self._write_session(session_id, "openai")
+
+        result = migrator.scan_sessions(self.codex_home)
+        session = next(item for item in result.sessions if item.session_id == session_id)
+        self.assertEqual(session.working_directory, working_directory)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            migrator.print_sessions([session])
+        self.assertIn(f"工作目录：{working_directory}", output.getvalue())
+        self.assertEqual(
+            migrator.display_working_directory(r"\\?\D:\workspace\example-project"),
+            working_directory,
+        )
+
     def test_filter_excludes_archived_and_filters_provider_and_date(self) -> None:
         first_id = "first-session"
         second_id = "second-session"

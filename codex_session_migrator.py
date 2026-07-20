@@ -20,6 +20,7 @@ from csmigrator.selection import (
     choose_backup_interactively,
     choose_sessions_interactively,
     choose_target_provider,
+    display_working_directory,
     discover_providers,
     parse_number_selection,
     print_issues,
@@ -32,7 +33,7 @@ from csmigrator.selection import (
 __all__ = [
     "BackupInfo", "MigrationResult", "ScanIssue", "ScanResult", "SessionRecord", "ThreadRecord", "ToolError",
     "build_parser", "choose_backup_interactively", "choose_sessions_interactively", "choose_target_provider",
-    "discover_providers", "ensure_codex_not_running", "filter_sessions", "find_running_codex_processes",
+    "discover_providers", "display_working_directory", "ensure_codex_not_running", "filter_sessions", "find_running_codex_processes",
     "list_backups", "load_backup_info", "load_thread_records", "locate_state_db", "main", "migrate_sessions",
     "parse_number_selection", "print_issues", "print_migration_preview", "print_restore_preview", "print_sessions",
     "restore_backup", "run_list", "run_migrate_preview", "run_restore", "scan_from_args", "scan_sessions",

@@ -88,12 +88,23 @@ def load_thread_records(state_db: Path) -> dict[str, ThreadRecord]:
     """读取数据库中的线程 provider、标题与归档状态。"""
     columns = thread_columns(state_db)
     archived_column = "archived" if "archived" in columns else "0"
-    query = f"SELECT id, model_provider, title, {archived_column} AS archived FROM threads"
+    working_directory_column = "cwd" if "cwd" in columns else "''"
+    query = (
+        "SELECT id, model_provider, title, "
+        f"{working_directory_column} AS working_directory, {archived_column} AS archived "
+        "FROM threads"
+    )
     with open_readonly_sqlite(state_db) as connection:
         rows = connection.execute(query).fetchall()
     return {
-        str(session_id): ThreadRecord(str(session_id), str(provider), str(title or ""), bool(archived))
-        for session_id, provider, title, archived in rows
+        str(session_id): ThreadRecord(
+            str(session_id),
+            str(provider),
+            str(title or ""),
+            str(working_directory or ""),
+            bool(archived),
+        )
+        for session_id, provider, title, working_directory, archived in rows
     }
 
 
@@ -210,6 +221,7 @@ def scan_sessions(codex_home: Path | None = None, state_db: Path | None = None, 
         sessions.append(SessionRecord(
             item.session_id, item.session_date, item.timestamp,
             titles.get(item.session_id) or (thread.title if thread else "") or "(无标题)",
+            thread.working_directory if thread else "",
             item.model_provider, thread.model_provider if thread else None, item.rollout_path,
             item.archived or bool(thread and thread.archived), status,
         ))
