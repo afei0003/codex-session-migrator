@@ -199,13 +199,13 @@ class ScanSessionsTests(unittest.TestCase):
 
     def test_running_codex_process_is_detected(self) -> None:
         completed = SimpleNamespace(returncode=0, stdout='"Codex.exe","123","Console","1","1 K"\n')
-        with patch.object(migrator.subprocess, "run", return_value=completed):
+        with patch("csmigrator.process_guard.subprocess.run", return_value=completed):
             self.assertEqual(migrator.find_running_codex_processes(), ["Codex.exe"])
 
     def test_process_detection_falls_back_to_powershell(self) -> None:
         denied = SimpleNamespace(returncode=1, stdout="")
         fallback = SimpleNamespace(returncode=0, stdout="codex\npython\n")
-        with patch.object(migrator.subprocess, "run", side_effect=[denied, fallback]):
+        with patch("csmigrator.process_guard.subprocess.run", side_effect=[denied, fallback]):
             self.assertEqual(migrator.find_running_codex_processes(), ["codex"])
 
     def test_restore_recovers_jsonl_and_database_and_backs_up_current_state(self) -> None:
@@ -285,6 +285,7 @@ class ScanSessionsTests(unittest.TestCase):
         rollout = self._write_session(session_id, "old-provider")
 
         with (
+            patch("csmigrator.process_guard.find_running_codex_processes", return_value=[]),
             patch("builtins.input", return_value="MIGRATE 99"),
             patch.object(migrator, "ensure_codex_not_running"),
             redirect_stdout(io.StringIO()),

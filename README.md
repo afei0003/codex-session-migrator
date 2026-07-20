@@ -4,6 +4,20 @@
 
 > 当前版本已支持扫描、选择、迁移、备份和恢复。
 
+## 代码结构
+
+项目保留 `codex_session_migrator.py` 作为兼容入口，业务实现按职责拆分在 `csmigrator/`：
+
+- `scanner.py`：扫描 JSONL、SQLite 与筛选会话；
+- `selection.py`：交互选择、provider 发现与终端预览；
+- `storage.py`：原子文件写入、SQLite 快照和哈希；
+- `migration.py`：迁移、备份、回滚与写后校验；
+- `restore.py`：备份校验与恢复；
+- `process_guard.py`：写入前的 Codex 进程保护；
+- `cli.py`：命令行参数和流程编排。
+
+原有调用方式保持不变；也可以使用 `python -m csmigrator --help`。
+
 ## 设计目标
 
 - 按日期查看 `~/.codex/sessions/` 中的会话。
