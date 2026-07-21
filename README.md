@@ -165,3 +165,9 @@ git diff --check
 - 不提供一键迁移全部会话。
 - 迁移和恢复前必须关闭 Codex。
 - 写入前必须备份并确认，写入后必须验证 JSONL 与 SQLite 一致。
+
+## License
+
+本项目采用 MIT License，详见 [LICENSE](LICENSE) 文件。
+
+本项目是一个独立的社区工具，与OpenAI无关联或未获得其认可
