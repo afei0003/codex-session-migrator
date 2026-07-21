@@ -5,8 +5,24 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+import os
 from pathlib import Path
-from typing import Any
+from typing import Any, MutableMapping
+
+
+def configure_localhost_proxy_bypass(environment: MutableMapping[str, str] | None = None) -> None:
+    """确保 Gradio 的本机启动请求不会被用户配置的代理接管。"""
+    target = environment if environment is not None else os.environ
+    localhost_hosts = ("127.0.0.1", "localhost", "::1")
+    for name in ("NO_PROXY", "no_proxy"):
+        entries = [item.strip() for item in target.get(name, "").split(",") if item.strip()]
+        known = {item.casefold() for item in entries}
+        entries.extend(host for host in localhost_hosts if host.casefold() not in known)
+        target[name] = ",".join(entries)
+
+
+# 必须在导入 Gradio 前设置。Gradio 会在导入与启动阶段向 127.0.0.1 发起 HTTP 请求。
+configure_localhost_proxy_bypass()
 
 import gradio as gr
 

@@ -57,6 +57,15 @@ class GradioAppTests(unittest.TestCase):
         ]
         self.assertEqual(gradio_app._selected_ids(rows), ["selected-session"])
 
+    def test_localhost_proxy_bypass_preserves_existing_entries(self) -> None:
+        environment = {"HTTP_PROXY": "socks5://127.0.0.1:1080", "NO_PROXY": "internal.example"}
+
+        gradio_app.configure_localhost_proxy_bypass(environment)
+
+        self.assertEqual(environment["NO_PROXY"], "internal.example,127.0.0.1,localhost,::1")
+        self.assertEqual(environment["no_proxy"], "127.0.0.1,localhost,::1")
+        self.assertEqual(environment["HTTP_PROXY"], "socks5://127.0.0.1:1080")
+
     def test_session_table_has_date_pickers_and_title_width(self) -> None:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", ResourceWarning)
