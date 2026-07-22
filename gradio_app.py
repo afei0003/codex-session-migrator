@@ -324,17 +324,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def launch_app(app: gr.Blocks, port: int, *, inbrowser: bool) -> None:
+    """在本机启动 Gradio 服务。
+
+    桌面启动器会复用这个函数，并自行负责浏览器和后台进程生命周期。
+    """
+    app.launch(
+        server_name="127.0.0.1",
+        server_port=port,
+        inbrowser=inbrowser,
+        share=False,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if not 1 <= args.port <= 65535:
         raise SystemExit("错误：--port 必须在 1 到 65535 之间")
     app = create_app(args.codex_home, args.state_db)
-    app.launch(
-        server_name="127.0.0.1",
-        server_port=args.port,
-        inbrowser=not args.no_browser,
-        share=False,
-    )
+    launch_app(app, args.port, inbrowser=not args.no_browser)
     return 0
 
 

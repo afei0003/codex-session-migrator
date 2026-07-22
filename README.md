@@ -31,11 +31,58 @@
 
 ## 环境要求
 
-- Python 3.11 或更高版本
-- Codex 本地数据目录，默认位置为 `~/.codex`
-- 使用 Web 界面时，需要安装 `requirements.txt` 中的 Gradio 依赖。
+- 使用 Windows 一键启动版：Windows x64、已安装并使用过 Codex；无需安装 Python。
+- 从源码运行 CLI 或 Web 界面：Python 3.11 或更高版本。
+- Codex 本地数据目录，默认位置为 `~/.codex`（Windows 通常对应 `%USERPROFILE%\.codex`）。
+- 从源码使用 Web 界面时，需要安装 `requirements.txt` 中的 Gradio 依赖。
 
-## 本机 Web 界面
+## Windows 一键启动版（推荐）
+
+Windows 用户不需要安装 Python，也不需要执行命令。推荐直接从 GitHub Release 下载：
+
+[下载 CodexSessionMigrator-windows-x64.zip](https://github.com/afei0003/codex-session-migrator/releases/latest)
+
+### 普通用户使用方法
+
+该压缩包适用于 **Windows x64**。下载后按以下步骤操作：
+
+1. 打开上面的 Release 页面，在 **Assets** 区域点击 `CodexSessionMigrator-windows-x64.zip` 下载。
+2. 将 zip 压缩包解压到一个单独的文件夹，例如桌面或 `D:\Apps\CodexSessionMigrator`。
+3. 打开解压后的文件夹，双击 `CodexSessionMigrator.exe`。
+4. 程序会自动启动本机 Web 服务并打开系统默认浏览器，随后即可使用扫描、迁移、备份和恢复功能。
+
+请解压整个压缩包后再运行，不要只把 exe 文件单独复制出来。也不要下载 Release 页面中的 `Source code (zip)`，那是项目源代码，不是可直接运行的程序。
+
+### 运行和退出
+
+- 程序默认只监听本机地址 `127.0.0.1`，不会创建公网链接，也不会暴露给局域网。
+- 浏览器标签页关闭不会自动结束后台服务。
+- 使用完毕后，点击 Windows 右下角系统托盘中的 CodexSessionMigrator 图标，选择“退出”，程序会关闭后台服务。
+- 如果默认端口被占用，程序会自动选择其他可用端口，通常不需要用户处理。
+
+### 首次运行提示
+
+由于当前 Windows 版本尚未进行代码签名，Windows SmartScreen 可能显示“Windows 已保护你的电脑”或“未知发布者”。确认文件来自本项目的 GitHub Release 后，可点击“更多信息”→“仍要运行”。如果 Windows 阻止了解压或运行，也可以先右键 zip 文件，打开“属性”，勾选“解除锁定”（如果该选项存在），再重新解压。
+
+迁移或恢复前，请先彻底关闭 Codex；程序检测到 Codex 正在运行时会拒绝写入，以保护本地数据。
+
+### 自己构建 Windows 版本
+
+如果需要自行构建，先安装 Python 3.11 或更高版本，并在项目目录执行：
+
+```powershell
+# 安装构建依赖
+python -m pip install -r requirements-build.txt
+
+# 构建 Windows x64 免安装版本
+.\build_windows.ps1
+```
+
+构建完成后，`dist/CodexSessionMigrator-windows-x64.zip` 即为可分发压缩包。macOS 和 Linux 需要分别构建对应平台版本，不能直接使用这个 Windows 压缩包。
+
+## 本机 Web 界面（源码运行）
+
+如果你使用 Windows，优先推荐上面的免安装版本。本节主要适用于开发者、需要从源码运行的用户，以及 macOS/Linux 用户。
 
 Web 界面仅监听 `127.0.0.1`，不会创建公开链接，也不会暴露给局域网。它直接调用与 CLI 相同的安全业务层，不会通过网页执行 Shell 命令。
 
@@ -127,23 +174,7 @@ python gradio_app.py
 
 所有结果、错误信息和备份路径都会显示在页面中。
 
-如果你的环境设置了 SOCKS 代理，`requirements.txt` 已通过 `httpx[socks]` 安装所需的 `socksio` 支持；请始终使用项目 `.venv` 中的 Python 启动页面。
-
-## 命令行速查
-
-```powershell
-python codex_session_migrator.py --help
-python codex_session_migrator.py --version
-python codex_session_migrator.py list --from 2026-07-01 --to 2026-07-31
-python codex_session_migrator.py list --provider OpenAI
-python codex_session_migrator.py migrate
-python codex_session_migrator.py migrate --session-id <SESSION_ID>
-python codex_session_migrator.py migrate --session-id <SESSION_ID> --to-provider custom --dry-run
-python codex_session_migrator.py restore
-python codex_session_migrator.py restore --backup <备份目录> --dry-run
-```
-
-`list` 用于只读扫描；`migrate` 用于预览或执行迁移；`restore` 用于预览或恢复备份。完整参数含义、筛选方式、确认短语、备份恢复和故障处理请查看下方操作指南。
+如果你的环境设置了 SOCKS 代理，`requirements.txt` 已通过 `httpx[socks]` 安装所需的 `socksio` 支持
 
 ## 完整操作步骤
 
