@@ -40,7 +40,7 @@
 
 Windows 用户不需要安装 Python，也不需要执行命令。推荐直接从 GitHub Release 下载：
 
-[下载 CodexSessionMigrator-windows-x64.zip](https://github.com/afei0003/codex-session-migrator/releases/latest)
+[下载 CodexSessionMigrator-windows-x64.zip](https://github.com/afei0003/codex-session-migrator/releases/download/v0.2.0/CodexSessionMigrator-windows-x64.zip)
 
 ### 普通用户使用方法
 
